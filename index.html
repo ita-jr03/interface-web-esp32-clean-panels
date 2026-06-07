@@ -158,7 +158,7 @@
     
     .btn-login { background-color: #0288d1; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
     .btn-login:hover { background-color: #0277bd; }
-    .btn-start { background-color: var(--accent-active); }
+    .btn-start { background-color: var(--accent-active); margin-bottom: 10px; }
     .btn-stop { background-color: var(--accent-stop); }
     .btn-mode { flex: 1; background-color: #555; border: 1px solid #777;}
     .btn-mode.active { background-color: var(--accent-info); border-color: #4fc3f7;}
@@ -179,18 +179,13 @@
     .motor-status-box {
       background-color: #e0e0e0;
       border-radius: 6px;
-      padding: 10px;
+      padding: 15px 10px;
       text-align: center;
-      margin-bottom: 15px;
+      margin-bottom: 20px;
       border: 1px solid #ccc;
+      transition: all 0.3s ease;
     }
     .motor-status-box.active { background-color: #e8f5e9; border-color: var(--accent-active); color: var(--accent-active); }
-
-    /* Botão Reverter */
-    #btnReverter { position: relative; overflow: hidden; background-color: #ff9800; color: white; }
-    #btnReverter span { position: relative; z-index: 2; pointer-events: none;}
-    #btnReverter::before { content: ''; position: absolute; top: 0; left: 0; bottom: 0; background-color: #e65100; width: 0%; z-index: 1; transition: width 0s linear; }
-    #btnReverter.holding::before { width: 100%; transition: width 3s linear; }
 
     /* Terminal de Logs SCADA */
     .log-terminal { background-color: rgba(0, 0, 0, 0.85); color: #fff; border-radius: 6px; height: 200px; overflow-y: auto; padding: 10px; font-family: 'Courier New', Courier, monospace; font-size: 0.9rem; border: 1px solid #555; display: flex; flex-direction: column-reverse; }
@@ -288,16 +283,11 @@
         <h2><span class="material-icons">gamepad</span> Comandos (Manual)</h2>
         
         <div id="motorFeedback" class="motor-status-box">
-          <p style="margin: 0; font-weight: bold; font-size: 1.1rem;">Estado do Sistema: <span id="lblEstadoMotor">PARADO</span></p>
+          <p style="margin: 0; font-weight: bold; font-size: 1.1rem;">Status: <br><span id="lblEstadoMotor" style="font-size: 1.4rem; display: block; margin-top: 8px;">AGUARDANDO...</span></p>
         </div>
 
         <button id="btnIniciar" class="btn-start"><span class="material-icons">play_arrow</span> Iniciar Limpeza</button>
-        <button id="btnPausar" class="btn-stop"><span class="material-icons">pause</span> Pausar Motores</button>
-        <div style="margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px;">
-          <p style="margin: 0 0 10px 0; font-size: 1.1rem; color: #555; text-align: center;">Sentido de Movimentação</p>
-          <p style="margin: 0 0 15px 0; text-align: center;"><strong id="lblDirecao" style="color: var(--accent-info); font-size: 1.5rem; letter-spacing: 2px;">DIR</strong></p>
-          <button id="btnReverter"><span>Segure 3s para Inverter</span></button>
-        </div>
+        <button id="btnPausar" class="btn-stop"><span class="material-icons">pause</span> Parar Motores</button>
       </div>
 
       <div class="card">
@@ -318,6 +308,11 @@
         </div>
 
         <div class="data-row" style="margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; color: #555;">
+          <span>Sensores (Esq | Dir):</span>
+          <span class="value-display" style="font-size: 1.2rem;"><span id="valDistEsq">--</span>cm | <span id="valDistDir">--</span>cm</span>
+        </div>
+
+        <div class="data-row" style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 15px; color: #555;">
           <span>Ciclos Completos:</span>
           <span class="value-display" style="font-size: 1.8rem;" id="valCiclos">--</span>
         </div>
@@ -364,9 +359,25 @@
     const db = firebase.database();
     const secondaryApp = firebase.initializeApp(firebaseConfig, "Secondary");
     
-    // Variáveis do Cronômetro
+    // Variáveis do Cronômetro e Heartbeat
     let segundosRestantes = 0;
     let intervaloCronometro = null;
+    let ultimoHeartbeat = -1;
+    let watchdogTimeout;
+
+    // Função auxiliar para traduzir os códigos de estado do ESP32
+    function traduzirEstado(estadoRaw) {
+        switch(estadoRaw) {
+            case "DIR": return "INDO PARA DIREITA →";
+            case "ESQ": return "← VOLTANDO PARA ESQUERDA";
+            case "PARADO": return "■ PARADO";
+            case "HOMING": return "⚙ BUSCANDO BASE (HOME)";
+            case "PAUSA_FIM_1": return "⏳ PARADA (Aguardando)";
+            case "PAUSA_FIM_2": return "↻ LIGANDO ESCOVA...";
+            case "PAUSA_HOME": return "✓ CICLO CONCLUÍDO";
+            default: return estadoRaw;
+        }
+    }
 
     // --- FUNÇÃO DO SISTEMA DE LOGS ---
     function registrarLog(mensagem, tipo = "info") {
@@ -385,16 +396,11 @@
       entrada.className = "log-entry";
       entrada.innerHTML = `<span class="log-time">[${hora}:${min}:${sec}]</span> <span class="${classeCor}">${mensagem}</span>`;
 
-      // Insere sempre no topo
       logBox.insertBefore(entrada, logBox.firstChild);
-
-      // Limita a 50 linhas para não travar o navegador
-      if(logBox.children.length > 50) {
-        logBox.removeChild(logBox.lastChild);
-      }
+      if(logBox.children.length > 50) logBox.removeChild(logBox.lastChild);
     }
 
-    // --- STATUS DO SERVIDOR ---
+    // --- STATUS DO SERVIDOR FIREBASE ---
     const serverLed = document.getElementById('serverLed');
     const serverText = document.getElementById('serverStatusText');
     db.ref(".info/connected").on("value", snap => {
@@ -481,45 +487,74 @@
       const espLed = document.getElementById("espLed");
       const espText = document.getElementById("espStatusText");
       
-      let watchdogTimeout;
-      
-      // Variáveis para rastrear mudanças e evitar flood no log
       let ultimoModo = null;
-      let ultimoStatusMotor = null;
       let ultimaDirecao = null;
 
-      // Leitura
+      // Leitura Master
       baseRef.on("value", (snapshot) => {
         const data = snapshot.val();
         if(!data) return;
 
-        // Cão de guarda
-        clearTimeout(watchdogTimeout);
-        if(espLed.className !== "status-dot dot-ok") {
-            espLed.className = "status-dot dot-ok";
-            espText.innerText = "ESP32 Trocando Informações";
-            registrarLog("ESP32 respondendo e sincronizada com a IHM.", "sucesso");
-        }
-        
-        watchdogTimeout = setTimeout(() => {
-          espLed.className = "status-dot dot-error";
-          espText.innerText = "Não Há Troca de Informações";
-          registrarLog("ALERTA: Perda de comunicação com a ESP32! Verifique a energia e o Wi-Fi da placa.", "erro");
-        }, 15000);
+        // --- VALIDAÇÃO REAL DO ESP32 (HEARTBEAT) ---
+        if(data.telemetria && data.telemetria.heartbeat !== undefined) {
+            // Só zera o cronômetro se o "coração" do ESP32 bateu um número diferente
+            if (data.telemetria.heartbeat !== ultimoHeartbeat) {
+                ultimoHeartbeat = data.telemetria.heartbeat;
 
+                clearTimeout(watchdogTimeout);
+                if(espLed.className !== "status-dot dot-ok") {
+                    espLed.className = "status-dot dot-ok";
+                    espText.innerText = "ESP32 Online e Sincronizado";
+                    registrarLog("O hardware ESP32 conectou e está enviando dados reais.", "sucesso");
+                }
+                
+                // Cão de Guarda: Tolera 5 segundos sem pulso
+                watchdogTimeout = setTimeout(() => {
+                  espLed.className = "status-dot dot-error";
+                  espText.innerText = "ESP32 Offline / Sem Resposta";
+                  registrarLog("ALERTA CRÍTICO: Perda de comunicação com a ESP32! O robô não está enviando pulsos.", "erro");
+                }, 5000); 
+            }
+        }
+
+        // --- PREENCHIMENTO DA TELEMETRIA ---
         if(data.telemetria) {
           document.getElementById("valBat1").innerText = data.telemetria.tensao_bat1.toFixed(1);
           document.getElementById("valBat2").innerText = data.telemetria.tensao_bat2.toFixed(1);
           document.getElementById("valCiclos").innerText = data.telemetria.ciclos_realizados;
+          
+          if(data.telemetria.distancia_esq !== undefined) {
+             document.getElementById("valDistEsq").innerText = data.telemetria.distancia_esq;
+             document.getElementById("valDistDir").innerText = data.telemetria.distancia_dir;
+          }
+
           atualizarBateria("bat1-fill", data.telemetria.tensao_bat1);
           atualizarBateria("bat2-fill", data.telemetria.tensao_bat2);
 
-          // Atualiza o tempo restante recebido da ESP32
+          // Lógica Integrada de Feedback do Motor
+          if(data.telemetria.sentido_movimento) {
+              const estadoTraduzido = traduzirEstado(data.telemetria.sentido_movimento);
+              document.getElementById("lblEstadoMotor").innerText = estadoTraduzido;
+              
+              const motorBox = document.getElementById("motorFeedback");
+              if (data.telemetria.sentido_movimento !== "PARADO" && data.telemetria.sentido_movimento !== "PAUSA_HOME") {
+                  motorBox.className = "motor-status-box active";
+              } else {
+                  motorBox.className = "motor-status-box";
+              }
+
+              if (ultimaDirecao !== null && ultimaDirecao !== data.telemetria.sentido_movimento) {
+                  registrarLog(`Máquina reportou status: ${estadoTraduzido}`, "info");
+              }
+              ultimaDirecao = data.telemetria.sentido_movimento;
+          }
+
           if(data.telemetria.tempo_restante !== undefined) {
             segundosRestantes = data.telemetria.tempo_restante;
           }
         }
 
+        // --- CONFIGURAÇÕES E ESTADO DE BOTÕES ---
         if(data.config) {
           const isAuto = (data.config.modo === "automatico");
           const isManual = !isAuto;
@@ -540,7 +575,6 @@
           document.getElementById("selPeriodoTipo").value = data.config.periodo_tipo;
           document.getElementById("numPeriodoValor").value = data.config.periodo_valor;
 
-          // Exibe o contador apenas no modo AUTO se o robô estiver parado
           const roboParado = data.comandos ? !data.comandos.iniciar : true;
           if (isAuto && roboParado) {
             document.getElementById("countdownContainer").style.display = "block";
@@ -551,29 +585,9 @@
             intervaloCronometro = null;
           }
         }
-
-        if(data.comandos) {
-          document.getElementById("lblDirecao").innerText = data.comandos.sentido_direcao;
-          if (ultimaDirecao !== null && ultimaDirecao !== data.comandos.sentido_direcao) {
-              registrarLog(`Mecânica: Sentido de tração invertido para a ${data.comandos.sentido_direcao === "DIR" ? "DIREITA" : "ESQUERDA"}.`, "info");
-          }
-          ultimaDirecao = data.comandos.sentido_direcao;
-
-          if (data.comandos.iniciar === true) {
-            document.getElementById("lblEstadoMotor").innerText = "EM MOVIMENTO";
-            document.getElementById("motorFeedback").className = "motor-status-box active";
-            if (ultimoStatusMotor !== true) registrarLog("Ciclo de limpeza dos painéis foi INICIADO.", "sucesso");
-            ultimoStatusMotor = true;
-          } else {
-            document.getElementById("lblEstadoMotor").innerText = "PARADO";
-            document.getElementById("motorFeedback").className = "motor-status-box";
-            if (ultimoStatusMotor !== false && ultimoStatusMotor !== null) registrarLog("Motores de tração e escova foram PARADOS.", "alerta");
-            ultimoStatusMotor = false;
-          }
-        }
       });
 
-      // Escritas
+      // --- COMANDOS DE ESCRITA ---
       document.getElementById("btnModoManual").onclick = () => {
         baseRef.child("config/modo").set("manual");
         showToast("Modo alterado para MANUAL");
@@ -593,15 +607,13 @@
       };
 
       document.getElementById("btnIniciar").onclick = () => {
-        registrarLog("Enviando ordem remota para PARTIDA...", "info");
+        registrarLog("Ordem Web enviada: INICIAR OPERAÇÃO...", "info");
         baseRef.child("comandos/iniciar").set(true);
-        baseRef.child("comandos/pausar").set(false);
       };
 
       document.getElementById("btnPausar").onclick = () => {
-        registrarLog("Enviando ordem remota para PARADA...", "info");
+        registrarLog("Ordem Web enviada: PARADA...", "alerta");
         baseRef.child("comandos/iniciar").set(false);
-        baseRef.child("comandos/pausar").set(true);
       };
       
       document.getElementById("btnResetCiclos").onclick = () => {
@@ -612,42 +624,14 @@
         }
       };
 
-      const btnRev = document.getElementById("btnReverter");
-      let timerReversao;
-      
-      const iniciarReversao = (e) => {
-        e.preventDefault(); 
-        btnRev.classList.add("holding");
-        timerReversao = setTimeout(() => {
-          const sentido = document.getElementById("lblDirecao").innerText === "DIR" ? "ESQ" : "DIR";
-          baseRef.child("comandos/sentido_direcao").set(sentido);
-          btnRev.classList.remove("holding");
-          showToast("Sentido Revertido para " + sentido + "!");
-        }, 3000);
-      };
-
-      const cancelarReversao = () => {
-        clearTimeout(timerReversao);
-        btnRev.classList.remove("holding");
-      };
-
-      btnRev.addEventListener("mousedown", iniciarReversao);
-      btnRev.addEventListener("touchstart", iniciarReversao);
-      btnRev.addEventListener("mouseup", cancelarReversao);
-      btnRev.addEventListener("mouseleave", cancelarReversao);
-      btnRev.addEventListener("touchend", cancelarReversao);
-
-      // --- FUNÇÃO DO CRONÔMETRO REGRESSIVO VISUAL DA IHM ---
+      // --- CRONÔMETRO ---
       function iniciarCronometroVisual() {
         intervaloCronometro = setInterval(() => {
           if (segundosRestantes > 0) {
             segundosRestantes--;
-            
-            // Formata os segundos em HH:MM:SS
             const horas = String(Math.floor(segundosRestantes / 3600)).padStart(2, '0');
             const minutos = String(Math.floor((segundosRestantes % 3600) / 60)).padStart(2, '0');
             const segundos = String(segundosRestantes % 60).padStart(2, '0');
-            
             document.getElementById("lblCountdown").innerText = `${horas}:${minutos}:${segundos}`;
           } else {
             document.getElementById("lblCountdown").innerText = "00:00:00";
